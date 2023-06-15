@@ -8,6 +8,7 @@ import {
 } from "ethers/lib/utils";
 
 import { BlockTag, Provider } from "@ethersproject/abstract-provider";
+
 import { PercentMath } from "@morpho-labs/ethers-utils/lib/maths";
 import { minBN } from "@morpho-labs/ethers-utils/lib/utils";
 
@@ -20,6 +21,7 @@ import addresses from "./contracts/addresses";
 import {
   GlobalDataFetcher,
   MarketFetcher,
+  MarketSupplyFetcher,
   RewardsFetcher,
   UserFetcher,
 } from "./fetchers";
@@ -40,6 +42,7 @@ import {
   getExtraFetchers,
 } from "./fetchers/getExtraFetchers";
 import { MorphoEpochDistribution } from "./helpers/rewards/rewards.types";
+import { validateMarketSupplyData } from "./helpers/validators/supplyData";
 import P2PInterestRates from "./maths/P2PInterestRates";
 import PoolInterestRates from "./maths/PoolInterestRates";
 import { AdapterMock } from "./mocks";
@@ -47,7 +50,7 @@ import { ADAPTER_MOCK_1 } from "./mocks/mock1";
 import { MorphoAaveV3Simulator } from "./simulation/MorphoAaveV3Simulator";
 import { ApprovalHandlerOptions } from "./txHandler/ApprovalHandler.interface";
 import MockTxHandler from "./txHandler/Mock.TxHandler";
-import { ITransactionHandler } from "./txHandler/TransactionHandler.interface";
+import { ISimpleTxHandler } from "./txHandler/TxHandler.interface";
 import Web3TxHandler from "./txHandler/Web3.TxHandler";
 import { ITransactionNotifier } from "./txHandler/notifiers/TransactionNotifier.interface";
 import {
@@ -136,7 +139,7 @@ export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
     private _userFetcher: UserFetcher,
     private _globalDataFetcher: GlobalDataFetcher,
     private _rewardsFetcher: RewardsFetcher,
-    private _txHandler: ITransactionHandler | null = null
+    private _txHandler: ISimpleTxHandler | null = null
   ) {
     super();
     this.marketsData$.next({});
