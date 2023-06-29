@@ -11,11 +11,17 @@ import addresses from "../contracts/addresses";
 import { Underlying } from "../mocks/markets";
 import { MorphoAaveV3Simulator } from "../simulation/MorphoAaveV3Simulator";
 import { ErrorCode } from "../simulation/SimulationError";
-import { OperationType, TxOperation } from "../simulation/simulation.types";
+import {
+  Operation,
+  OperationType,
+  TxOperation,
+} from "../simulation/simulation.types";
 import { Address, TransactionOptions, TransactionType } from "../types";
+import { Connectable } from "../utils/mixins/Connectable";
 
 import { Bulker } from "./Bulker.TxHandler.interface";
 import { IBatchTxHandler } from "./TxHandler.interface";
+import { NotifierManager } from "./mixins/NotifierManager";
 
 import BulkerTx = Bulker.TransactionType;
 
@@ -23,26 +29,41 @@ export enum BulkerSignatureType {
   transfer = "TRANSFER",
   managerApproval = "BULKER_APPROVAL",
 }
-export interface BulkerTransferSignature {
+type FullfillableSignature<Fullfilled extends boolean | null = null> =
+  Fullfilled extends true
+    ? Signature
+    : Fullfilled extends false
+    ? undefined
+    : Signature | undefined;
+
+export interface BulkerTransferSignature<
+  Fullfilled extends boolean | null = null
+> {
   type: BulkerSignatureType.transfer;
   underlyingAddress: Address;
   amount: BigNumber;
   to: Address;
   nonce: BigNumber;
-  signature?: Signature;
+  signature: FullfillableSignature<Fullfilled>;
   transactionIndex: number;
 }
-export interface BulkerApprovalSignature {
+
+export interface BulkerApprovalSignature<
+  Fullfilled extends boolean | null = null
+> {
   type: BulkerSignatureType.managerApproval;
   manager: Address;
   nonce: BigNumber;
-  signature?: Signature;
+  signature: FullfillableSignature<Fullfilled>;
   transactionIndex: number;
 }
-export type BulkerSignature = BulkerTransferSignature | BulkerApprovalSignature;
+
+export type BulkerSignature<Fullfilled extends boolean | null = null> =
+  | BulkerTransferSignature<Fullfilled>
+  | BulkerApprovalSignature<Fullfilled>;
 
 export default class BulkerTxHandler
-  extends MorphoAaveV3Simulator
+  extends NotifierManager(Connectable(MorphoAaveV3Simulator))
   implements IBatchTxHandler
 {
   #adapter: MorphoAaveV3Adapter;
@@ -62,12 +83,15 @@ export default class BulkerTxHandler
     return this.bulkerOperations$.getValue().flat();
   }
 
-  constructor(
-    parentAdapter: MorphoAaveV3Adapter,
-    options: { deferSignatures: boolean } = { deferSignatures: true }
-  ) {
+  constructor(parentAdapter: MorphoAaveV3Adapter) {
     super(parentAdapter);
     this.#adapter = parentAdapter;
+    parentAdapter.setBatchTxHandler(this);
+  }
+
+  public disconnect(): void {
+    this.reset();
+    super.disconnect();
   }
 
   reset() {
@@ -77,23 +101,78 @@ export default class BulkerTxHandler
     super.reset();
   }
 
-  public addOperations(operations: TxOperation[]): void {
-    console.log("addOperations", operations);
-    this._simulatorOperations.next(operations);
+  public addOperations(operations: Operation[]): void {
+    this.simulatorOperations$.next([
+      ...this.simulatorOperations$.getValue(),
+      ...operations,
+    ]);
   }
 
-  public addSignatures(signatures: BulkerSignature[]): void {
-    const currentSignatures = this.signatures$.getValue().map((signature) => {
-      const newSignature = signatures.find(
-        (newSignature) =>
-          newSignature.transactionIndex === signature.transactionIndex &&
-          newSignature.type === signature.type
-      );
-      if (!newSignature) return signature;
+  public clearAllOperations(): void {
+    this.simulatorOperations$.next([]);
+    this.signatures$.next([]);
+  }
 
-      // TODO: add signature validation
-      return newSignature;
+  public removeLastOperation(): void {
+    const nOperations = this.simulatorOperations$.getValue().length;
+    if (nOperations === 0) return;
+
+    this.simulatorOperations$.next(
+      this.simulatorOperations$.getValue().slice(0, -1)
+    );
+    this.signatures$.next(
+      this.signatures$
+        .getValue()
+        .filter((s) => s.transactionIndex !== nOperations - 1)
+    );
+  }
+
+  _applyOperations({
+    operations,
+    data,
+  }: {
+    data: MorphoAaveV3DataHolder;
+    operations: Operation[];
+  }): void {
+    super._applyOperations({ operations, data });
+  }
+
+  #askForSignature(signature: BulkerSignature<false>) {
+    const oldSignatures = [...this.signatures$.getValue()];
+    const existingSignature = oldSignatures.find((sig) => {
+      if (sig.type !== signature.type) return false;
+
+      if (sig.type === BulkerSignatureType.managerApproval) {
+        return true;
+      }
+
+      return (
+        sig.transactionIndex === signature.transactionIndex &&
+        //@ts-expect-error
+        sig.underlyingAddress === signature.underlyingAddress
+      );
     });
+
+    if (existingSignature) {
+      return this.signatures$.next(oldSignatures);
+    }
+    return this.signatures$.next([...oldSignatures, signature]);
+  }
+
+  public addSignatures(signatures: BulkerSignature<true>[]): void {
+    const currentSignatures = this.signatures$
+      .getValue()
+      .map((signatureRequest) => {
+        const fullfilledSignature = signatures.find(
+          (signature) =>
+            signature.transactionIndex === signatureRequest.transactionIndex &&
+            signature.type === signatureRequest.type
+        );
+        if (!fullfilledSignature) return signatureRequest;
+
+        // TODO: add signature validation
+        return fullfilledSignature;
+      });
     this.signatures$.next(currentSignatures);
   }
 
@@ -106,7 +185,9 @@ export default class BulkerTxHandler
     operation: TxOperation,
     index: number
   ): MorphoAaveV3DataHolder | null {
-    const { underlyingAddress, amount } = operation;
+    const { underlyingAddress, formattedAmount } = operation;
+
+    const amount = formattedAmount!;
 
     const transferData = this.#transferToBulker(
       data,
@@ -151,8 +232,9 @@ export default class BulkerTxHandler
     operation: TxOperation,
     index: number
   ): MorphoAaveV3DataHolder | null {
-    console.log("BulkerTxHandler._applySupplyCollateralOperation");
-    const { underlyingAddress, amount } = operation;
+    const { underlyingAddress, formattedAmount } = operation;
+
+    const amount = formattedAmount!;
 
     const transferData = this.#transferToBulker(
       data,
@@ -198,7 +280,9 @@ export default class BulkerTxHandler
     operation: TxOperation,
     index: number
   ): MorphoAaveV3DataHolder | null {
-    const { underlyingAddress, amount } = operation;
+    const { underlyingAddress, formattedAmount } = operation;
+
+    const amount = formattedAmount!;
 
     const transferData = this.#transferToBulker(
       data,
@@ -230,13 +314,25 @@ export default class BulkerTxHandler
     batch.push({
       type: BulkerTx.repay,
       asset: underlyingAddress,
-      amount,
+      amount, //TODO We want to send max for a repay max
     });
     if (defers.length > 0) batch.push(...defers);
     this._value = this._value.add(value);
     this.bulkerOperations$.next([...this.bulkerOperations$.getValue(), batch]);
 
     return dataAfterRepay;
+  }
+
+  #approveManager(data: MorphoAaveV3DataHolder, index: number) {
+    if (!data.getUserData()?.isBulkerManaging) {
+      this.#askForSignature({
+        type: BulkerSignatureType.managerApproval,
+        manager: addresses.bulker,
+        signature: undefined,
+        nonce: BigNumber.from(0), //TODO
+        transactionIndex: index,
+      });
+    }
   }
 
   protected _applyBorrowOperation(
@@ -257,13 +353,11 @@ export default class BulkerTxHandler
       !userMarketsData ||
       !isAddress(userData.address) ||
       userData.address === constants.AddressZero
-    )
+    ) {
       return this._raiseError(index, ErrorCode.missingData, operation);
+    }
 
-    const { amount: max, limiter } =
-      data.getUserMaxCapacity(underlyingAddress, TransactionType.borrow) ?? {};
-    if (!max || !limiter)
-      return this._raiseError(index, ErrorCode.missingData, operation);
+    this.#approveManager(data, index);
 
     const receiver = operation.unwrap ? addresses.bulker : userData.address;
 
@@ -271,7 +365,7 @@ export default class BulkerTxHandler
       type: txType,
       to: receiver,
       asset: underlyingAddress,
-      amount: operation.amount,
+      amount: operation.formattedAmount!,
     });
 
     const stateAfterBorrow = super._applyBorrowOperation(
@@ -284,7 +378,7 @@ export default class BulkerTxHandler
     if (operation.unwrap) {
       const unwrapOp = {
         type: OperationType.unwrap,
-        amount: operation.amount,
+        amount: operation.formattedAmount!,
         underlyingAddress: operation.underlyingAddress,
       } as const;
 
@@ -302,7 +396,7 @@ export default class BulkerTxHandler
         batch,
       ]);
 
-      return super._applyUnwrapOperation(stateAfterBorrow, unwrapOp, index);
+      return this._applyOperation(stateAfterBorrow, unwrapOp, index);
     }
     this.bulkerOperations$.next([...this.bulkerOperations$.getValue(), batch]);
 
@@ -342,7 +436,7 @@ export default class BulkerTxHandler
       type: txType,
       receiver,
       asset: underlyingAddress,
-      amount: operation.amount,
+      amount: operation.formattedAmount!, //TODO handle max withdraw
     });
 
     const stateAfterWithdraw = super._applyWithdrawOperation(
@@ -355,7 +449,7 @@ export default class BulkerTxHandler
     if (operation.unwrap) {
       const unwrapOp = {
         type: OperationType.unwrap,
-        amount: operation.amount,
+        amount: operation.formattedAmount!,
         underlyingAddress: operation.underlyingAddress,
       } as const;
 
@@ -374,7 +468,7 @@ export default class BulkerTxHandler
         batch,
       ]);
 
-      return super._applyUnwrapOperation(stateAfterWithdraw, unwrapOp, index);
+      return this._applyOperation(stateAfterWithdraw, unwrapOp, index);
     }
 
     this.bulkerOperations$.next([...this.bulkerOperations$.getValue(), batch]);
@@ -417,7 +511,7 @@ export default class BulkerTxHandler
       type: txType,
       receiver,
       asset: underlyingAddress,
-      amount: operation.amount,
+      amount: operation.formattedAmount!,
     });
 
     const stateAfterWithdraw = super._applyWithdrawCollateralOperation(
@@ -430,7 +524,7 @@ export default class BulkerTxHandler
     if (operation.unwrap) {
       const unwrapOp = {
         type: OperationType.unwrap,
-        amount: operation.amount,
+        amount: operation.formattedAmount!,
         underlyingAddress: operation.underlyingAddress,
       } as const;
 
@@ -449,7 +543,7 @@ export default class BulkerTxHandler
         batch,
       ]);
 
-      return super._applyUnwrapOperation(stateAfterWithdraw, unwrapOp, index);
+      return this._applyOperation(stateAfterWithdraw, unwrapOp, index);
     }
 
     this.bulkerOperations$.next([...this.bulkerOperations$.getValue(), batch]);
@@ -483,8 +577,8 @@ export default class BulkerTxHandler
     let value = constants.Zero;
     let simulatedData: MorphoAaveV3DataHolder | null = data;
 
-    const userMarketsData = this.#adapter.getUserMarketsData();
-    const userData = this.#adapter.getUserData();
+    const userMarketsData = simulatedData.getUserMarketsData();
+    const userData = simulatedData.getUserData();
     if (!userData || !userMarketsData)
       return this._raiseError(index, ErrorCode.missingData);
 
@@ -514,6 +608,16 @@ export default class BulkerTxHandler
           });
         }
 
+        this.#askForSignature({
+          type: BulkerSignatureType.transfer,
+          underlyingAddress: addresses.steth,
+          amount: amountToWrap,
+          to: addresses.bulker,
+          nonce: userData.stEthData.bulkerNonce,
+          signature: undefined,
+          transactionIndex: index,
+        });
+
         batch.push(
           {
             type: BulkerTx.transferFrom2,
@@ -526,7 +630,7 @@ export default class BulkerTxHandler
             amount: amountToWrap,
           }
         );
-        simulatedData = this._applyWrapOperation(
+        simulatedData = this._applyOperation(
           simulatedData,
           {
             type: OperationType.wrap,
@@ -555,7 +659,7 @@ export default class BulkerTxHandler
           asset: addresses.weth,
           amount: wethMissing,
         });
-        simulatedData = this._applyWrapOperation(
+        simulatedData = this._applyOperation(
           simulatedData,
           {
             type: OperationType.wrap,
@@ -581,8 +685,16 @@ export default class BulkerTxHandler
           asset: underlyingAddress,
           amount: toTransfer,
         });
-        //  TODO: retrieve signature
       }
+      this.#askForSignature({
+        type: BulkerSignatureType.transfer,
+        underlyingAddress: underlyingAddress,
+        amount: toTransfer,
+        to: addresses.bulker,
+        nonce: userMarketsData[underlyingAddress]!.bulkerNonce,
+        signature: undefined,
+        transactionIndex: index,
+      });
       // transfer
       batch.push({
         type: BulkerTx.transferFrom2,
