@@ -1,5 +1,5 @@
 import { BigNumber } from "ethers";
-import { Operation } from "src/simulation/simulation.types";
+import { TxOperation } from "src/simulation/simulation.types";
 
 import {
   Address,
@@ -19,7 +19,9 @@ export interface INotifierManager {
   resetNotifiers: () => ITransactionNotifier[];
 }
 
-export interface ISimpleTxHandler extends INotifierManager, ApprovalHandlerInterface {
+export interface ISimpleTxHandler
+  extends INotifierManager,
+    ApprovalHandlerInterface {
   handleMorphoTransaction: (
     operation: TransactionType,
     market: Token,
@@ -35,9 +37,17 @@ export interface ISimpleTxHandler extends INotifierManager, ApprovalHandlerInter
     options?: TransactionOptions
   ) => Promise<any>;
 
-  handleWrapEth: (amount: BigNumber, options?: TransactionOptions) => Promise<void>;
+  handleWrapEth: (
+    amount: BigNumber,
+    options?: TransactionOptions
+  ) => Promise<void>;
 }
 
-export interface IBatchTxHandler extends INotifierManager {
-  handleBatchTransaction: (operations: Operation[], options?: TransactionOptions) => Promise<any>;
+export interface IBatchTxHandler {
+  addOperations: (operations: TxOperation[]) => void;
+  clearAllOperations: () => void;
+  removeLastOperation: () => void;
+  reset: () => void;
+  close: () => any;
+  executeBatch: (options?: TransactionOptions) => Promise<void>;
 }

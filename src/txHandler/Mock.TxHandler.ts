@@ -10,32 +10,23 @@ import {
   TransactionType,
 } from "../types";
 import { delay } from "../utils";
+import { Base } from "../utils/mixins/Base";
+import { Connectable } from "../utils/mixins/Connectable";
 import { getPermit2Message } from "../utils/permit2";
 
 import { ApprovalHandlerOptions } from "./ApprovalHandler.interface";
-import { NotifierManager } from "./NotifierManager";
 import { ISimpleTxHandler } from "./TxHandler.interface";
+import { NotifierManager } from "./mixins/NotifierManager";
 
-export default class MockTxHandler extends NotifierManager implements ISimpleTxHandler {
-  private _isMockTxHandler = true;
-  static isMockTxHandler(txHandler: any): txHandler is MockTxHandler {
-    return !!(txHandler && txHandler._isMockTxHandler);
-  }
-
-  private _user: string | null = null;
+export default class MockTxHandler
+  extends Connectable(NotifierManager(Base))
+  implements ISimpleTxHandler
+{
   private _shortDelay: number;
 
   constructor(private _longDelay: number, _shortDelay?: number) {
     super();
     this._shortDelay = _shortDelay ?? this._longDelay / 4;
-  }
-
-  public connect(user: string | null) {
-    this._user = user;
-  }
-
-  public disconnect() {
-    this._user = null;
   }
 
   async handleMorphoTransaction(
@@ -49,24 +40,45 @@ export default class MockTxHandler extends NotifierManager implements ISimpleTxH
     const id = Date.now().toString();
     const notifier = this.notifier;
     try {
-      await notifier?.onStart?.(id, this._user, txType, symbol, amount, decimals);
+      await notifier?.onStart?.(
+        id,
+        this._user,
+        txType,
+        symbol,
+        amount,
+        decimals
+      );
 
-      await notifier?.onConfirmWaiting?.(id, this._user, txType, symbol, amount, decimals);
+      await notifier?.onConfirmWaiting?.(
+        id,
+        this._user,
+        txType,
+        symbol,
+        amount,
+        decimals
+      );
 
       await delay(null, this._longDelay);
 
       await notifier?.onConfirmed?.(id);
 
       if (
-        [TransactionType.repay, TransactionType.supplyCollateral, TransactionType.supply].includes(
-          txType
-        )
+        [
+          TransactionType.repay,
+          TransactionType.supplyCollateral,
+          TransactionType.supply,
+        ].includes(txType)
       ) {
         await notifier?.onApprovalSignatureWaiting?.(id, this._user, symbol);
 
         await delay(null, this._longDelay);
 
-        const msg = getPermit2Message(address, amount, constants.Zero, BigNumber.from(Date.now()));
+        const msg = getPermit2Message(
+          address,
+          amount,
+          constants.Zero,
+          BigNumber.from(Date.now())
+        );
         await notifier?.onApprovalSigned?.(id, { ...msg, signature: "0x" });
       }
 
@@ -80,7 +92,11 @@ export default class MockTxHandler extends NotifierManager implements ISimpleTxH
           break;
         }
         default: {
-          await this._handleTransaction(id, this._shortDelay, txType === TransactionType.borrow);
+          await this._handleTransaction(
+            id,
+            this._shortDelay,
+            txType === TransactionType.borrow
+          );
         }
       }
       await notifier?.close?.(id, true);
@@ -102,7 +118,14 @@ export default class MockTxHandler extends NotifierManager implements ISimpleTxH
     const id = Date.now().toString();
 
     try {
-      await notifier?.onConfirmWaiting?.(id, user, "Claim", "MORPHO", displayedAmount, 18);
+      await notifier?.onConfirmWaiting?.(
+        id,
+        user,
+        "Claim",
+        "MORPHO",
+        displayedAmount,
+        18
+      );
 
       const claimData = await transaction;
 
@@ -110,7 +133,14 @@ export default class MockTxHandler extends NotifierManager implements ISimpleTxH
 
       const { amount } = claimData;
 
-      await notifier?.onConfirmWaiting?.(id, user, "Claim", "MORPHO", amount, 18);
+      await notifier?.onConfirmWaiting?.(
+        id,
+        user,
+        "Claim",
+        "MORPHO",
+        amount,
+        18
+      );
 
       await delay(null, this._longDelay);
 
@@ -124,16 +154,30 @@ export default class MockTxHandler extends NotifierManager implements ISimpleTxH
     }
   }
 
-  public async handleApproval(token: Token, amount: BigNumber, options?: ApprovalHandlerOptions) {
+  public async handleApproval(
+    token: Token,
+    amount: BigNumber,
+    options?: ApprovalHandlerOptions
+  ) {
     if (!this._user) return;
     const notifier = this.notifier;
     const id = Date.now().toString();
 
     try {
-      if (options?.spender && getAddress(options.spender) !== getAddress(addresses.morphoAaveV3))
+      if (
+        options?.spender &&
+        getAddress(options.spender) !== getAddress(addresses.morphoAaveV3)
+      )
         throw Error("You can only approve Morpho AaveV3 Contract");
 
-      await notifier?.onStart?.(id, this._user, "Approval", token.symbol, amount, token.decimals);
+      await notifier?.onStart?.(
+        id,
+        this._user,
+        "Approval",
+        token.symbol,
+        amount,
+        token.decimals
+      );
       await notifier?.onConfirmWaiting?.(
         id,
         this._user,
@@ -186,12 +230,21 @@ export default class MockTxHandler extends NotifierManager implements ISimpleTxH
       await delay(null, this._longDelay);
 
       await notifier?.onConfirmed?.(id);
-      await notifier?.onApprovalSignatureWaiting?.(id, this._user, token.symbol);
+      await notifier?.onApprovalSignatureWaiting?.(
+        id,
+        this._user,
+        token.symbol
+      );
 
       await delay(null, this._longDelay);
 
       if (amount.gt(0)) {
-        const msg = getPermit2Message(token.address, amount, nonce, BigNumber.from(Date.now()));
+        const msg = getPermit2Message(
+          token.address,
+          amount,
+          nonce,
+          BigNumber.from(Date.now())
+        );
         await notifier?.onApprovalSigned?.(id, { ...msg, signature: "0x" });
       }
       await notifier?.onPending?.(id);
@@ -206,7 +259,11 @@ export default class MockTxHandler extends NotifierManager implements ISimpleTxH
     }
   }
 
-  private async _handleTransaction(id: string, timeout = this._shortDelay, shouldRevert = false) {
+  private async _handleTransaction(
+    id: string,
+    timeout = this._shortDelay,
+    shouldRevert = false
+  ) {
     if (!this._user) throw Error("not connected");
 
     const notifier = this.notifier;
@@ -229,7 +286,14 @@ export default class MockTxHandler extends NotifierManager implements ISimpleTxH
 
     try {
       await notifier?.onStart?.(id, this._user, "Wrap", "ETH", amount, 18);
-      await notifier?.onConfirmWaiting?.(id, this._user, "Wrap", "ETH", amount, 18);
+      await notifier?.onConfirmWaiting?.(
+        id,
+        this._user,
+        "Wrap",
+        "ETH",
+        amount,
+        18
+      );
 
       await delay(null, 1000);
 

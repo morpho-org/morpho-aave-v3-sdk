@@ -3,6 +3,20 @@ import { BigNumber, Signature } from "ethers";
 import { Address } from "../types";
 
 export namespace Bulker {
+  export interface SignatureHook {
+    handleTokenSignatures(
+      params: { token: Address; amount: BigNumber; receiver: Address }[]
+    ): Promise<Signature[]>;
+    handleManagerSignature(
+      params: { isAllowed: boolean; nonce: BigNumber; deadline: BigNumber }[]
+    ): Promise<Signature>;
+  }
+
+  export enum Signatures {
+    approveManager = "approveManager",
+    approve2 = "approve2",
+  }
+
   export enum TransactionType {
     approve2 = "Approve2",
     transferFrom2 = "TransferFrom2",
@@ -13,10 +27,8 @@ export namespace Bulker {
     repay = "Repay",
     withdraw = "Withdraw",
     withdrawCollateral = "WithdrawCollateral",
-    wrapEth = "WrapEth",
-    unwrapEth = "UnwrapEth",
-    wrapStEth = "WrapStEth",
-    unwrapStEth = "UnwrapStEth",
+    unwrap = "unwrap",
+    wrap = "wrap",
     skim = "Skim",
     claimRewards = "ClaimRewards",
   }
@@ -25,6 +37,10 @@ export namespace Bulker {
     type: TransactionType.approve2;
     asset: Address;
     amount: BigNumber;
+    signature?: Omit<
+      Signature,
+      "_vs" | "recoveryParam" | "yParity" | "compact"
+    >;
   }
 
   export interface TransferFrom2Transaction {
@@ -38,37 +54,35 @@ export namespace Bulker {
     isAllowed: boolean;
     nonce: BigNumber;
     deadline: BigNumber;
-    signature: Omit<Signature, "_vs" | "recoveryParam" | "yParity" | "compact">;
+    signature?: Omit<
+      Signature,
+      "_vs" | "recoveryParam" | "yParity" | "compact"
+    >;
   }
 
   export interface SupplyTransaction {
     type: TransactionType.supply;
     asset: Address;
     amount: BigNumber;
-    onBehalf: Address;
-    maxIterations: BigNumber;
   }
 
   export interface SupplyCollateralTransaction {
     type: TransactionType.supplyCollateral;
     asset: Address;
     amount: BigNumber;
-    onBehalf: Address;
   }
 
   export interface BorrowTransaction {
     type: TransactionType.borrow;
     asset: Address;
     amount: BigNumber;
-    onBehalf: Address;
-    maxIterations: BigNumber;
+    to: Address;
   }
 
   export interface RepayTransaction {
     type: TransactionType.repay;
     asset: Address;
     amount: BigNumber;
-    onBehalf: Address;
   }
 
   export interface WithdrawTransaction {
@@ -76,7 +90,6 @@ export namespace Bulker {
     asset: Address;
     amount: BigNumber;
     receiver: Address;
-    maxIterations: BigNumber;
   }
 
   export interface WithdrawCollateralTransaction {
@@ -86,24 +99,15 @@ export namespace Bulker {
     receiver: Address;
   }
 
-  export interface WrapEthTransaction {
-    type: TransactionType.wrapEth;
+  export interface WrapTransaction {
+    type: TransactionType.wrap;
+    asset: Address;
     amount: BigNumber;
   }
 
-  export interface UnwrapEthTransaction {
-    type: TransactionType.unwrapEth;
-    amount: BigNumber;
-    receiver: Address;
-  }
-
-  export interface WrapStEthTransaction {
-    type: TransactionType.wrapStEth;
-    amount: BigNumber;
-  }
-
-  export interface UnwrapStEthTransaction {
-    type: TransactionType.unwrapStEth;
+  export interface UnwrapTransaction {
+    type: TransactionType.unwrap;
+    asset: Address;
     amount: BigNumber;
     receiver: Address;
   }
@@ -111,13 +115,11 @@ export namespace Bulker {
   export interface SkimTransaction {
     type: TransactionType.skim;
     asset: Address;
-    receiver: Address;
   }
 
   export interface ClaimRewardsTransaction {
     type: TransactionType.claimRewards;
     assets: Address[];
-    onBehalf: Address;
   }
 
   export type Transactions =
@@ -130,10 +132,8 @@ export namespace Bulker {
     | RepayTransaction
     | WithdrawTransaction
     | WithdrawCollateralTransaction
-    | WrapEthTransaction
-    | UnwrapEthTransaction
-    | WrapStEthTransaction
-    | UnwrapStEthTransaction
+    | WrapTransaction
+    | UnwrapTransaction
     | SkimTransaction
     | ClaimRewardsTransaction;
 }

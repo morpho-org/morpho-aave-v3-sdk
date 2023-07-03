@@ -8,6 +8,7 @@ import { MarketsConfigs, MarketsData, UserMarketsData } from "./adapter.types";
 import { LT_LOWER_BOUND } from "./constants";
 import { MorphoAaveMath } from "./maths/AaveV3.maths";
 import {
+  Address,
   FetchedStatic,
   FetchedUpdated,
   GlobalData,
@@ -20,6 +21,8 @@ import {
 export class MorphoAaveV3DataHolder {
   protected __MATH__ = new MorphoAaveMath();
 
+  protected _user: Address | null = null;
+
   constructor(
     protected _marketsConfigs: MarketsConfigs = {},
     protected _marketsData: MarketsData = {},
@@ -27,7 +30,9 @@ export class MorphoAaveV3DataHolder {
     protected _globalData: FetchedUpdated<GlobalData> = null,
     protected _userData: FetchedUpdated<UserData> = null,
     protected _userMarketsData: UserMarketsData = {}
-  ) {}
+  ) {
+    this._user = _userData?.address ?? null;
+  }
 
   /* Getters */
   public getMarketsConfigs() {
@@ -49,7 +54,10 @@ export class MorphoAaveV3DataHolder {
     return deepCopy(this._globalData);
   }
 
-  public computeUserData(): Omit<UserData, "ethBalance" | "morphoRewards"> {
+  public computeUserData(): Omit<
+    UserData,
+    "ethBalance" | "morphoRewards" | "stEthData" | "isBulkerManaging"
+  > {
     let liquidationValue = constants.Zero;
     let borrowCapacity = constants.Zero;
     let totalSupplyOnPool = constants.Zero;
@@ -221,6 +229,7 @@ export class MorphoAaveV3DataHolder {
     }
 
     return {
+      address: this._user ?? constants.AddressZero,
       liquidationValue,
       borrowCapacity,
       totalBorrowInP2P,

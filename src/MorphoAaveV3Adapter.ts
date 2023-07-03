@@ -8,7 +8,7 @@ import {
 } from "ethers/lib/utils";
 
 import { BlockTag, Provider } from "@ethersproject/abstract-provider";
-
+import { BaseProvider } from "@ethersproject/providers";
 import { PercentMath } from "@morpho-labs/ethers-utils/lib/maths";
 import { minBN } from "@morpho-labs/ethers-utils/lib/utils";
 
@@ -21,7 +21,6 @@ import addresses from "./contracts/addresses";
 import {
   GlobalDataFetcher,
   MarketFetcher,
-  MarketSupplyFetcher,
   RewardsFetcher,
   UserFetcher,
 } from "./fetchers";
@@ -42,7 +41,6 @@ import {
   getExtraFetchers,
 } from "./fetchers/getExtraFetchers";
 import { MorphoEpochDistribution } from "./helpers/rewards/rewards.types";
-import { validateMarketSupplyData } from "./helpers/validators/supplyData";
 import P2PInterestRates from "./maths/P2PInterestRates";
 import PoolInterestRates from "./maths/PoolInterestRates";
 import { AdapterMock } from "./mocks";
@@ -50,16 +48,21 @@ import { ADAPTER_MOCK_1 } from "./mocks/mock1";
 import { MorphoAaveV3Simulator } from "./simulation/MorphoAaveV3Simulator";
 import { ApprovalHandlerOptions } from "./txHandler/ApprovalHandler.interface";
 import MockTxHandler from "./txHandler/Mock.TxHandler";
-import { ISimpleTxHandler } from "./txHandler/TxHandler.interface";
+import {
+  IBatchTxHandler,
+  ISimpleTxHandler,
+} from "./txHandler/TxHandler.interface";
 import Web3TxHandler from "./txHandler/Web3.TxHandler";
 import { ITransactionNotifier } from "./txHandler/notifiers/TransactionNotifier.interface";
 import {
   Address,
   MaxCapacityLimiter,
+  StEthData,
   TransactionOptions,
   TransactionType,
   UserData,
 } from "./types";
+import { isConnectable } from "./utils/mixins/Connectable";
 
 export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
   private _isMorphoAdapter = true;
@@ -70,7 +73,7 @@ export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
   static fromChain(params?: {
     txSignature?: string;
     extraFetchersConfig?: Partial<ExtraFetchersConfig>;
-    provider?: Provider;
+    provider?: BaseProvider;
   }) {
     const {
       txSignature,
@@ -79,7 +82,7 @@ export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
     } = params ?? {};
     const { rewardsFetcher } = getExtraFetchers(extraFetchersConfig);
 
-    const provider = _provider ? _provider : sdk.configuration.defaultProvider;
+    const provider = _provider ?? sdk.configuration.defaultProvider;
 
     return new MorphoAaveV3Adapter(
       new ChainMarketFetcher(provider),
@@ -101,7 +104,7 @@ export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
         shortDelay
       ),
       new StaticUserFetcher(
-        ADAPTER_MOCK.ethBalance,
+        ADAPTER_MOCK.userData,
         deepCopy(ADAPTER_MOCK.userMarketsData),
         longDelay,
         shortDelay
@@ -125,7 +128,6 @@ export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
 
   private __POOL_IRM__ = new PoolInterestRates();
 
-  private _user: Address | null = null;
   private _signer: Signer | null = null;
 
   protected _scaledMarketsData: ScaledMarketsData = {};
@@ -139,7 +141,8 @@ export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
     private _userFetcher: UserFetcher,
     private _globalDataFetcher: GlobalDataFetcher,
     private _rewardsFetcher: RewardsFetcher,
-    private _txHandler: ISimpleTxHandler | null = null
+    private _txHandler: ISimpleTxHandler | null = null,
+    private _batchTxHandler: IBatchTxHandler | null = null
   ) {
     super();
     this.marketsData$.next({});
@@ -148,6 +151,22 @@ export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
     this.userMarketsData$.next({});
     this.userData$.next(null);
     this.globalData$.next(null);
+  }
+
+  public setTxHandler(txHandler: ISimpleTxHandler | null) {
+    this._txHandler = txHandler;
+
+    if (isConnectable(this._txHandler)) {
+      this._txHandler.connect(this._signer, this._user);
+    }
+  }
+
+  public setBatchTxHandler(batchTxHandler: IBatchTxHandler | null) {
+    this._batchTxHandler = batchTxHandler;
+
+    if (isConnectable(this._batchTxHandler)) {
+      this._batchTxHandler.connect(this._signer, this._user);
+    }
   }
 
   /** Return a simulator instance that allows you to simulate transactions */
@@ -190,15 +209,17 @@ export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
     this._user = user;
     this._signer = signer;
 
-    if (signer?.provider) await this._setProvider(signer.provider);
+    if (signer?.provider)
+      await this._setProvider(signer.provider as BaseProvider);
 
     await this._updateUserData(true);
 
-    if (Web3TxHandler.isWeb3TxHandler(this._txHandler)) {
-      this._txHandler.connect(signer);
+    if (isConnectable(this._txHandler)) {
+      this._txHandler.connect(signer, user);
     }
-    if (MockTxHandler.isMockTxHandler(this._txHandler)) {
-      this._txHandler.connect(user);
+
+    if (isConnectable(this._batchTxHandler)) {
+      this._batchTxHandler.connect(signer, user);
     }
 
     return this;
@@ -210,15 +231,19 @@ export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
 
     await this._setProvider();
 
-    if (
-      Web3TxHandler.isWeb3TxHandler(this._txHandler) ||
-      MockTxHandler.isMockTxHandler(this._txHandler)
-    ) {
+    if (isConnectable(this._txHandler)) {
       this._txHandler.disconnect();
     }
+
+    if (isConnectable(this._batchTxHandler)) {
+      this._batchTxHandler.disconnect();
+    }
+
     this._scaledUserMarketsData = {};
     this.userMarketsData = Object.fromEntries(
-      this._marketsList!.map((underlyingAddress) => [underlyingAddress, null])
+      this._marketsList!.map(
+        (underlyingAddress) => [underlyingAddress, null] as const
+      )
     );
 
     this.userData = null;
@@ -229,7 +254,7 @@ export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
     return this._user !== null;
   }
 
-  private async _setProvider(provider?: ethers.providers.Provider) {
+  private async _setProvider(provider?: ethers.providers.BaseProvider) {
     provider ??= sdk.configuration.defaultProvider;
 
     if (ChainFetcher.isChainFetcher(this._marketFetcher)) {
@@ -364,7 +389,7 @@ export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
 
     this._txHandler.addNotifier(refreshNotifier);
 
-    this._txHandler.handleClaimMorpho(
+    await this._txHandler.handleClaimMorpho(
       this._user,
       rewardsClaimData,
       this._userData?.morphoRewards?.claimable ?? constants.Zero,
@@ -459,14 +484,20 @@ export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
         .fetchAllMarkets(this._globalData!.currentBlock.number)
         .then((r) => r.map(getAddress));
       this.marketsConfigs = Object.fromEntries(
-        this._marketsList!.map((underlyingAddress) => [underlyingAddress, null])
+        this._marketsList!.map(
+          (underlyingAddress) => [underlyingAddress, null] as const
+        )
       );
       this.marketsData = Object.fromEntries(
-        this._marketsList!.map((underlyingAddress) => [underlyingAddress, null])
+        this._marketsList!.map(
+          (underlyingAddress) => [underlyingAddress, null] as const
+        )
       );
 
       this.userMarketsData = Object.fromEntries(
-        this._marketsList!.map((underlyingAddress) => [underlyingAddress, null])
+        this._marketsList!.map(
+          (underlyingAddress) => [underlyingAddress, null] as const
+        )
       );
 
       this.userData = null;
@@ -486,6 +517,7 @@ export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
       underlyingAddress,
       blockTag
     );
+
     if (
       !marketConfig.eModeCategoryId.isZero() &&
       this._globalData!.eModeCategoryData.eModeId.eq(
@@ -497,7 +529,6 @@ export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
         // override LTV and LT with eMode values
         collateralFactor:
           this._globalData!.eModeCategoryData.liquidationThreshold,
-        // If LTV = 0, then LT = 0 on Morpho
         borrowableFactor: this._globalData!.eModeCategoryData.ltv,
       };
     }
@@ -548,7 +579,13 @@ export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
                 claimable: data.balances.claimable,
                 current: data.balances.currentEpoch,
               }
-          )
+          ),
+        this._userFetcher.fetchManagerApproval(
+          user,
+          addresses.bulker,
+          blockTag
+        ),
+        this._userFetcher.fetchStethData(user, blockTag)
       );
     }
     promises.push(
@@ -565,18 +602,32 @@ export class MorphoAaveV3Adapter extends MorphoAaveV3DataEmitter {
       })
     );
 
-    const [ethBalanceOrVoid, morphoRewardsOrVoid] = (await Promise.all(
-      promises
-    )) as [BigNumber, UserData["morphoRewards"] | null];
+    const [
+      ethBalanceOrVoid,
+      morphoRewardsOrVoid,
+      managerApprovalOrVoid,
+      stEthBalanceOrVoid,
+    ] = (await Promise.all(promises)) as [
+      BigNumber,
+      UserData["morphoRewards"] | null,
+      boolean | null,
+      StEthData | null
+    ];
 
     const ethBalance = fetch ? ethBalanceOrVoid : this._userData!.ethBalance;
     const morphoRewards = fetch
       ? morphoRewardsOrVoid
       : this._userData!.morphoRewards;
+    const isBulkerManaging = fetch
+      ? managerApprovalOrVoid!
+      : this._userData!.isBulkerManaging;
+    const stEthData = fetch ? stEthBalanceOrVoid! : this._userData!.stEthData;
 
     this.userData = {
       ethBalance,
       morphoRewards,
+      isBulkerManaging,
+      stEthData,
       ...this.computeUserData(),
     };
 
